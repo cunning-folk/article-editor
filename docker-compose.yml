@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  article-editor:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ARTICLE_EDITOR_HOST=0.0.0.0
+      - ARTICLE_EDITOR_PORT=8000
+      - ARTICLE_EDITOR_LOG_LEVEL=INFO
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./config.json:/app/config.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Add a reverse proxy
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - article-editor
+    restart: unless-stopped
+    profiles:
+      - production
+
+networks:
+  default:
+    name: article-editor-network

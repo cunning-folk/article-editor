@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Article Editor - AI-Powered Document Processing</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .drag-over {
+            @apply border-blue-500 bg-blue-50;
+        }
+        .progress-bar {
+            transition: width 0.3s ease-in-out;
+        }
+        .diff-added {
+            background-color: #dcfce7;
+            color: #166534;
+        }
+        .diff-removed {
+            background-color: #fef2f2;
+            color: #dc2626;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <!-- Navigation -->
+    <nav class="bg-white shadow-sm border-b">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <i class="fas fa-edit text-blue-600 text-2xl mr-3"></i>
+                    <h1 class="text-xl font-semibold text-gray-900">Article Editor</h1>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <button @click="activeTab = 'editor'" :class="activeTab === 'editor' ? 'text-blue-600 border-blue-600' : 'text-gray-500'" class="px-3 py-2 border-b-2 font-medium text-sm">
+                        Editor
+                    </button>
+                    <button @click="activeTab = 'batch'" :class="activeTab === 'batch' ? 'text-blue-600 border-blue-600' : 'text-gray-500'" class="px-3 py-2 border-b-2 font-medium text-sm">
+                        Batch Process
+                    </button>
+                    <button @click="activeTab = 'history'" :class="activeTab === 'history' ? 'text-blue-600 border-blue-600' : 'text-gray-500'" class="px-3 py-2 border-b-2 font-medium text-sm">
+                        History
+                    </button>
+                    <button @click="activeTab = 'settings'" :class="activeTab === 'settings' ? 'text-blue-600 border-blue-600' : 'text-gray-500'" class="px-3 py-2 border-b-2 font-medium text-sm">
+                        Settings
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8" x-data="articleEditor()">
+        
+        <!-- Editor Tab -->
+        <div x-show="activeTab === 'editor'" class="space-y-6">
+            
+            <!-- File Upload Section -->
+            <div class="bg-white rounded-lg shadow p-6">
+                <h2 class="text-lg font-medium text-gray-900 mb-4">Upload Document</h2>
+                
+                <!-- Drag and Drop Area -->
+                <div 
+                    class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center transition-colors"
+                    :class="isDragging ? 'drag-over' : ''"
+                    @dragover.prevent="isDragging = true"
+                    @dragleave.prevent="isDragging = false"
+                    @drop.prevent="handleFileDrop($event)"
+                >
+                    <div x-show="!uploadedFile">
+                        <i class="fas fa-cloud-upload-alt text-4xl text-gray-400 mb-4"></i>
+                        <p class="text-xl text-gray-600 mb-2">Drag and drop your document here</p>
+                        <p class="text-sm text-gray-500 mb-4">or click to browse</p>
+                        <input type="file" @change="handleFileSelect($event)" accept=".txt,.md,.docx,.doc" class="hidden" x-ref="fileInput">
+                        <button @click="$refs.fileInput.click()" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">
+                            Choose File
+                        </button>
+                        <p class="text-xs text-gray-400 mt-2">Supports .txt, .md, .docx files</p>
+                    </div>
+                    
+                    <!-- File Info -->
+                    <div x-show="uploadedFile" class="text-left">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center">
+                                <i class="fas fa-file-alt text-blue-600 text-2xl mr-3"></i>
+                                <div>
+                                    <p class="font-medium text-gray-900" x-text="uploadedFile?.filename"></p>
+                                    <p class="text-sm text-gray-500" x-text="formatFileSize(uploadedFile?.file_info?.size_bytes)"></p>
+                                </div>
+                            </div>
+                            <button @click="clearFile()" class="text-red-600 hover:text-red-800">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                        
+                        <!-- File Stats -->
+                        <div class="grid grid-cols-3 gap-4 text-sm">
+                            <div>
+                                <span class="text-gray-500">Words:</span>
+                                <span class="font-medium" x-text="uploadedFile?.file_info?.word_count?.toLocaleString() || 'N/A'"></span>
+                            </div>
+                            <div>
+                                <span class="text-gray-500">Characters:</span>
+                                <span class="font-medium" x-text="uploadedFile?.file_info?.char_count?.toLocaleString() || 'N/A'"></span>
+                            </div>
+                            <div>
+                                <span class="text-gray-500">Format:</span>
+                                <span class="font-medium" x-text="uploadedFile?.file_info?.extension"></span>
+                            </div>
+                        </div>
+                        
+                        <!-- Warnings -->
+                        <div x-show="uploadedFile?.warnings?.length > 0" class="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded">
+                            <div class="flex">
+                                <i class="fas fa-exclamation-triangle text-yellow-600 mr-2 mt-0.5"></i>
+                                <div>
+                                    <p class="text-sm font-medium text-yellow-800">Warnings:</p>
+                                    <ul class="text-sm text-yellow-700 mt-1">
+                                        <template x-for="warning in uploadedFile.warnings">
+                                            <li x-text="warning"></li>
+                                        </template>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Processing Options -->
+            <div x-show="uploadedFile" class="bg-white rounded-lg shadow p-6">
+                <h2 class="text-lg font-medium text-gray-900 mb-4">Processing Options</h2>
+                
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- Left Column -->
+                    <div class="space-y-4">
+                        <!-- Editing Type -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Editing Type</label>
+                            <select x-model="processingOptions.editingType" @change="updateInstructions()" class="w-full border border-gray-300 rounded-md px-3 py-2">
+                                <option value="comprehensive">Comprehensive Edit</option>
+                                <option value="grammar">Grammar Only</option>
+                                <option value="style">Style Improvement</option>
+                                <option value="clarity">Clarity & Flow</option>
+                                <option value="custom">Custom Instructions</option>
+                            </select>
+                        </div>
+                        
+                        <!-- Custom Instructions -->
+                        <div x-show="processingOptions.editingType === 'custom'">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Custom Instructions</label>
+                            <textarea 
+                                x-model="processingOptions.instructions" 
+                                rows="4" 
+                                class="w-full border border-gray-300 rounded-md px-3 py-2"
+                                placeholder="Enter your specific editing instructions..."
+                            ></textarea>
+                        </div>
+                        
+                        <!-- Model Selection -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">AI Model</label>
+                            <select x-model="processingOptions.model" class="w-full border border-gray-300 rounded-md px-3 py-2">
+                                <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet (Recommended)</option>
+                                <option value="claude-3-haiku-20240307">Claude 3 Haiku (Faster)</option>
+                                <option value="claude-3-opus-20240229">Claude 3 Opus (Highest Quality)</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- Right Column -->
+                    <div class="space-y-4">
+                        <!-- Chunk Size -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                Chunk Size: <span x-text="processingOptions.chunkSize.toLocaleString()"></span> tokens
+                            </label>
+                            <input 
+                                type="range" 
+                                x-model="processingOptions.chunkSize" 
+                                min="5000" 
+                                max="30000" 
+                                step="1000"
+                                class="w-full"
+                            >
+                            <div class="flex justify-between text-xs text-gray-500">
+                                <span>5K</span>
+                                <span>30K</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Overlap -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                Context Overlap: <span x-text="processingOptions.overlap.toLocaleString()"></span> tokens
+                            </label>
+                            <input 
+                                type="range" 
+                                x-model="processingOptions.overlap" 
+                                min="0" 
+                                max="2000" 
+                                step="100"
+                                class="w-full"
+                            >
+                            <div class="flex justify-between text-xs text-gray-500">
+                                <span>0</span>
+                                <span>2K</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Cost Estimate -->
+                        <div class="p-4 bg-gray-50 rounded-lg">
+                            <h3 class="font-medium text-gray-900 mb-2">Cost Estimate</h3>
+                            <div class="text-sm text-gray-600">
+                                <div>Estimated tokens: <span class="font-medium" x-text="estimatedTokens.toLocaleString()"></span></div>
+                                <div>Estimated cost: <span class="font-medium text-green-600">$<span x-text="estimatedCost.toFixed(4)"></span></span></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Action Buttons -->
+                <div class="flex space-x-4 mt-6">
+                    <button 
+                        @click="startProcessing(true)" 
+                        :disabled="isProcessing"
+                        class="bg-blue-100 text-blue-700 px-4 py-2 rounded-md hover:bg-blue-200 disabled:opacity-50"
+                    >
+                        <i class="fas fa-eye mr-2"></i>Preview First Chunk
+                    </button>
+                    <button 
+                        @click="startProcessing(false)" 
+                        :disabled="isProcessing"
+                        class="bg-blue-600 text-white px-6 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
+                    >
+                        <i class="fas fa-play mr-2"></i>Process Document
+                    </button>
+                </div>
+            </div>
+
+            <!-- Processing Status -->
+            <div x-show="isProcessing || processingResult" class="bg-white rounded-lg shadow p-6">
+                <h2 class="text-lg font-medium text-gray-900 mb-4">Processing Status</h2>
+                
+                <!-- Progress Bar -->
+                <div x-show="isProcessing" class="mb-4">
+                    <div class="flex justify-between text-sm text-gray-600 mb-2">
+                        <span x-text="processingStatus.message"></span>
+                        <span x-text="processingStatus.progress + '%'"></span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-2">
+                        <div 
+                            class="bg-blue-600 h-2 rounded-full progress-bar" 
+                            :style="`width: ${processingStatus.progress}%`"
+                        ></div>
+                    </div>
+                </div>
+                
+                <!-- Results -->
+                <div x-show="processingResult && !isProcessing" class="space-y-4">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                        <div class="p-3 bg-gray-50 rounded">
+                            <span class="text-gray-500">Chunks Processed:</span>
+                            <div class="font-medium" x-text="processingResult.chunks_count"></div>
+                        </div>
+                        <div class="p-3 bg-gray-50 rounded">
+                            <span class="text-gray-500">Tokens Used:</span>
+                            <div class="font-medium" x-text="(processingResult.token_usage?.input + processingResult.token_usage?.output)?.toLocaleString()"></div>
+                        </div>
+                        <div class="p-3 bg-gray-50 rounded">
+                            <span class="text-gray-500">Cost:</span>
+                            <div class="font-medium text-green-600">$<span x-text="processingResult.cost_estimate?.toFixed(6)"></span></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Preview Text -->
+                    <div x-show="processingResult.edited_text" class="mt-4">
+                        <h3 class="font-medium text-gray-900 mb-2">Preview (First Chunk)</h3>
+                        <div class="bg-gray-50 p-4 rounded border max-h-96 overflow-y-auto">
+                            <pre class="whitespace-pre-wrap text-sm" x-text="processingResult.edited_text"></pre>
+                        </div>
+                    </div>
+                    
+                    <!-- Download Button -->
+                    <div x-show="currentSessionId && !processingResult.edited_text" class="flex space-x-4">
+                        <button 
+                            @click="downloadResult()" 
+                            class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700"
+                        >
+                            <i class="fas fa-download mr-2"></i>Download Edited Document
+                        </button>
+                        <button 
+                            @click="showComparison = !showComparison" 
+                            class="bg-gray-600 text-white px-4 py-2 rounded-md hover:bg-gray-700"
+                        >
+                            <i class="fas fa-eye mr-2"></i>View Comparison
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Text Comparison -->
+            <div x-show="showComparison" class="bg-white rounded-lg shadow p-6">
+                <h2 class="text-lg font-medium text-gray-900 mb-4">Text Comparison</h2>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div>
+                        <h3 class="font-medium text-gray-700 mb-2">Original</h3>
+                        <div class="bg-gray-50 p-4 rounded border h-96 overflow-y-auto">
+                            <pre class="whitespace-pre-wrap text-sm" x-text="originalText"></pre>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 class="font-medium text-gray-700 mb-2">Edited</h3>
+                        <div class="bg-gray-50 p-4 rounded border h-96 overflow-y-auto">
+                            <pre class="whitespace-pre-wrap text-sm" x-text="editedText"></pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- History Tab -->
+        <div x-show="activeTab === 'history'" class="bg-white rounded-lg shadow">
+            <div class="p-6 border-b">
+                <h2 class="text-lg font-medium text-gray-900">Processing History</h2>
+            </div>
+            
+            <div class="divide-y">
+                <template x-for="session in sessions" :key="session.session_id">
+                    <div class="p-6 hover:bg-gray-50">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center space-x-4">
+                                <div class="flex-shrink-0">
+                                    <i :class="getStatusIcon(session.status)" class="text-2xl"></i>
+                                </div>
+                                <div>
+                                    <h3 class="font-medium text-gray-900" x-text="session.filename"></h3>
+                                    <p class="text-sm text-gray-500" x-text="new Date(session.created_at).toLocaleString()"></p>
+                                </div>
+                            </div>
+                            <div class="flex items-center space-x-4">
+                                <div class="text-sm text-gray-500">
+                                    <div x-show="session.token_usage">
+                                        Tokens: <span x-text="(session.token_usage?.input + session.token_usage?.output)?.toLocaleString()"></span>
+                                    </div>
+                                    <div x-show="session.cost_estimate">
+                                        Cost: $<span x-text="session.cost_estimate?.toFixed(6)"></span>
+                                    </div>
+                                </div>
+                                <div class="flex space-x-2">
+                                    <button 
+                                        x-show="session.status === 'completed'"
+                                        @click="downloadSession(session.session_id)"
+                                        class="text-blue-600 hover:text-blue-800"
+                                    >
+                                        <i class="fas fa-download"></i>
+                                    </button>
+                                    <button 
+                                        @click="deleteSession(session.session_id)"
+                                        class="text-red-600 hover:text-red-800"
+                                    >
+                                        <i class="fas fa-trash"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+                
+                <div x-show="sessions.length === 0" class="p-12 text-center text-gray-500">
+                    <i class="fas fa-history text-4xl mb-4"></i>
+                    <p>No processing history yet</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Settings Tab -->
+        <div x-show="activeTab === 'settings'" class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-lg font-medium text-gray-900 mb-4">Settings</h2>
+            
+            <div class="space-y-6">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">API Key Status</label>
+                    <div class="flex items-center space-x-2">
+                        <i class="fas fa-key text-gray-400"></i>
+                        <span class="text-sm text-gray-600">Configure via ANTHROPIC_API_KEY environment variable</span>
+                    </div>
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Default Chunk Size</label>
+                    <input 
+                        type="number" 
+                        x-model="defaultSettings.chunkSize" 
+                        min="5000" 
+                        max="30000"
+                        class="border border-gray-300 rounded-md px-3 py-2 w-32"
+                    >
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Default Overlap</label>
+                    <input 
+                        type="number" 
+                        x-model="defaultSettings.overlap" 
+                        min="0" 
+                        max="2000"
+                        class="border border-gray-300 rounded-md px-3 py-2 w-32"
+                    >
+                </div>
+                
+                <button @click="saveSettings()" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">
+                    Save Settings
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div x-show="isLoading" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-white p-6 rounded-lg shadow-lg">
+            <div class="flex items-center space-x-3">
+                <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+                <span>Processing...</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
