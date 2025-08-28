@@ -5,11 +5,18 @@
 function articleEditor() {
     return {
         // State
-        activeTab: 'editor',
+        activeTab: 'chat',
         isDragging: false,
         isLoading: false,
         isProcessing: false,
         showComparison: false,
+        
+        // Chat state
+        isProcessingChat: false,
+        chatFile: null,
+        chatMessages: [],
+        chatProgress: { current: 0, total: 0 },
+        chatSessionId: null,
         
         // Data
         uploadedFile: null,
@@ -53,11 +60,34 @@ function articleEditor() {
             return inputCost + outputCost;
         },
         
+        get hasChatResults() {
+            return this.chatMessages.some(msg => msg.status === 'approved');
+        },
+        
         // Lifecycle
         init() {
+            // Force all loading states to false on init
+            this.isLoading = false;
+            this.isProcessing = false;
+            this.isProcessingChat = false;
+            
+            // Clear any existing data
+            this.uploadedFile = null;
+            this.processingResult = null;
+            this.currentSessionId = null;
+            this.chatFile = null;
+            this.chatMessages = [];
+            
             this.loadSettings();
             this.loadSessions();
             this.updateInstructions();
+            
+            // Force a small delay to ensure DOM is ready
+            setTimeout(() => {
+                this.isLoading = false;
+                this.isProcessing = false;
+                this.isProcessingChat = false;
+            }, 100);
         },
         
         // File handling
@@ -392,6 +422,254 @@ Provide only the edited text without any explanatory comments.`
                     document.body.removeChild(notification);
                 }, 300);
             }, 5000);
+        },
+        
+        // Chat functionality
+        handleChatFileSelect(event) {
+            const files = event.target.files;
+            if (files.length > 0) {
+                this.uploadChatFile(files[0]);
+            }
+        },
+        
+        async uploadChatFile(file) {
+            this.isLoading = true;
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Upload failed');
+                }
+                
+                this.chatFile = await response.json();
+                this.showNotification('File uploaded for chat editing', 'success');
+                
+            } catch (error) {
+                this.showNotification('Upload failed: ' + error.message, 'error');
+                console.error('Chat upload error:', error);
+            } finally {
+                this.isLoading = false;
+            }
+        },
+        
+        clearChatFile() {
+            this.chatFile = null;
+            this.chatMessages = [];
+            this.chatProgress = { current: 0, total: 0 };
+            this.chatSessionId = null;
+        },
+        
+        async startChatEditing() {
+            if (!this.chatFile) {
+                this.showNotification('Please upload a file first', 'error');
+                return;
+            }
+            
+            this.isProcessingChat = true;
+            this.chatMessages = [];
+            
+            try {
+                const formData = new FormData();
+                formData.append('file_id', this.chatFile.file_id);
+                formData.append('filename', this.chatFile.filename);
+                
+                const response = await fetch('/api/chat/start', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to start chat editing');
+                }
+                
+                const result = await response.json();
+                this.chatSessionId = result.session_id;
+                this.chatProgress.total = result.total_paragraphs;
+                
+                // Connect to WebSocket for chat updates
+                this.connectChatWebSocket(result.session_id);
+                
+            } catch (error) {
+                this.isProcessingChat = false;
+                this.showNotification('Failed to start chat editing: ' + error.message, 'error');
+                console.error('Chat start error:', error);
+            }
+        },
+        
+        connectChatWebSocket(sessionId) {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/chat/${sessionId}`;
+            
+            this.websocket = new WebSocket(wsUrl);
+            
+            this.websocket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                this.handleChatMessage(data);
+            };
+            
+            this.websocket.onerror = (error) => {
+                console.error('Chat WebSocket error:', error);
+            };
+            
+            this.websocket.onclose = () => {
+                if (this.isProcessingChat) {
+                    setTimeout(() => {
+                        if (this.isProcessingChat && this.chatSessionId) {
+                            this.connectChatWebSocket(this.chatSessionId);
+                        }
+                    }, 2000);
+                }
+            };
+        },
+        
+        handleChatMessage(data) {
+            switch (data.type) {
+                case 'edit_suggestion':
+                    this.chatMessages.push({
+                        id: data.message_id,
+                        type: 'assistant',
+                        original_text: data.original_text,
+                        edited_text: data.edited_text,
+                        explanation: data.explanation,
+                        paragraph_index: data.paragraph_index,
+                        status: 'pending'
+                    });
+                    this.chatProgress.current = data.paragraph_index + 1;
+                    this.scrollToBottom();
+                    break;
+                    
+                case 'processing_complete':
+                    this.isProcessingChat = false;
+                    this.showNotification('Interactive editing completed!', 'success');
+                    break;
+                    
+                case 'error':
+                    this.isProcessingChat = false;
+                    this.showNotification('Chat editing error: ' + data.error, 'error');
+                    break;
+            }
+        },
+        
+        async approveEdit(messageId) {
+            try {
+                const response = await fetch('/api/chat/approve', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: this.chatSessionId,
+                        message_id: messageId
+                    })
+                });
+                
+                if (response.ok) {
+                    const message = this.chatMessages.find(msg => msg.id === messageId);
+                    if (message) {
+                        message.status = 'approved';
+                    }
+                } else {
+                    throw new Error('Failed to approve edit');
+                }
+            } catch (error) {
+                this.showNotification('Failed to approve edit: ' + error.message, 'error');
+            }
+        },
+        
+        async rejectEdit(messageId) {
+            try {
+                const response = await fetch('/api/chat/reject', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: this.chatSessionId,
+                        message_id: messageId
+                    })
+                });
+                
+                if (response.ok) {
+                    const message = this.chatMessages.find(msg => msg.id === messageId);
+                    if (message) {
+                        message.status = 'rejected';
+                    }
+                } else {
+                    throw new Error('Failed to reject edit');
+                }
+            } catch (error) {
+                this.showNotification('Failed to reject edit: ' + error.message, 'error');
+            }
+        },
+        
+        async requestRevision(messageId) {
+            const message = this.chatMessages.find(msg => msg.id === messageId);
+            if (!message) return;
+            
+            const revision = prompt('How would you like this revised?');
+            if (!revision) return;
+            
+            try {
+                const response = await fetch('/api/chat/revise', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: this.chatSessionId,
+                        message_id: messageId,
+                        revision_request: revision
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to request revision');
+                }
+                
+                this.chatMessages.push({
+                    id: Date.now().toString(),
+                    type: 'user',
+                    content: `Revision request: ${revision}`
+                });
+                
+                this.scrollToBottom();
+                
+            } catch (error) {
+                this.showNotification('Failed to request revision: ' + error.message, 'error');
+            }
+        },
+        
+        async downloadChatResult() {
+            if (!this.chatSessionId) return;
+            
+            try {
+                const response = await fetch(`/api/chat/download/${this.chatSessionId}`);
+                if (!response.ok) throw new Error('Download failed');
+                
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${this.chatFile.filename}_chat_edited.txt`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
+            } catch (error) {
+                this.showNotification('Download failed: ' + error.message, 'error');
+            }
+        },
+        
+        scrollToBottom() {
+            this.$nextTick(() => {
+                const chatMessages = this.$refs.chatMessages;
+                if (chatMessages) {
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+            });
         }
     };
 }

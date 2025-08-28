@@ -128,7 +128,15 @@ manager = ConnectionManager()
 @app.get("/", response_class=HTMLResponse)
 async def home():
     """Serve the main web interface."""
-    return FileResponse(str(project_root / "web" / "templates" / "index.html"))
+    from fastapi import Response
+    
+    with open(str(project_root / "web" / "templates" / "index.html"), 'r') as f:
+        html_content = f.read()
+    
+    response = Response(content=html_content, media_type="text/html")
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://cdn.tailwindcss.com https://unpkg.com https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com data:; img-src 'self' data:; connect-src 'self' wss: ws:;"
+    
+    return response
 
 
 @app.post("/api/upload")
@@ -442,6 +450,286 @@ async def health_check():
         "active_sessions": len(app_state.sessions),
         "websocket_connections": len(manager.active_connections)
     }
+
+
+# Chat editing endpoints
+@app.post("/api/chat/start")
+async def start_chat_editing(
+    background_tasks: BackgroundTasks,
+    file_id: str = Form(...),
+    filename: str = Form(...)
+):
+    """Start interactive chat editing."""
+    try:
+        # Get API key from environment
+        api_key = os.getenv('ANTHROPIC_API_KEY')
+        if not api_key:
+            raise HTTPException(status_code=400, detail="API key not configured")
+        
+        # Find uploaded file
+        file_path = None
+        for path in app_state.upload_dir.glob(f"{file_id}_*"):
+            file_path = path
+            break
+        
+        if not file_path:
+            raise HTTPException(status_code=404, detail="Uploaded file not found")
+        
+        # Read and split file into paragraphs
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Split by double newlines (paragraph breaks)
+        paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+        
+        # Create chat session
+        session_id = str(uuid.uuid4())
+        session_data = {
+            "session_id": session_id,
+            "filename": filename,
+            "file_path": str(file_path),
+            "status": "chat_active",
+            "progress": 0,
+            "created_at": datetime.now(),
+            "paragraphs": paragraphs,
+            "current_paragraph": 0,
+            "approved_edits": {},
+            "rejected_paragraphs": set()
+        }
+        
+        app_state.sessions[session_id] = session_data
+        
+        # Start background chat processing
+        background_tasks.add_task(
+            process_chat_editing,
+            session_id,
+            api_key
+        )
+        
+        return {
+            "session_id": session_id,
+            "total_paragraphs": len(paragraphs)
+        }
+    
+    except Exception as e:
+        app_state.logger.error(f"Chat start error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/chat/approve")
+async def approve_chat_edit(request: dict):
+    """Approve a suggested edit."""
+    try:
+        session_id = request.get("session_id")
+        message_id = request.get("message_id")
+        
+        if session_id not in app_state.sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        session = app_state.sessions[session_id]
+        session["approved_edits"][message_id] = True
+        
+        return {"status": "approved"}
+    
+    except Exception as e:
+        app_state.logger.error(f"Chat approve error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/chat/reject")
+async def reject_chat_edit(request: dict):
+    """Reject a suggested edit."""
+    try:
+        session_id = request.get("session_id")
+        message_id = request.get("message_id")
+        
+        if session_id not in app_state.sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        session = app_state.sessions[session_id]
+        session["approved_edits"][message_id] = False
+        
+        return {"status": "rejected"}
+    
+    except Exception as e:
+        app_state.logger.error(f"Chat reject error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/chat/revise")
+async def request_chat_revision(request: dict):
+    """Request a revision of the suggested edit."""
+    try:
+        session_id = request.get("session_id")
+        message_id = request.get("message_id")
+        revision_request = request.get("revision_request")
+        
+        if session_id not in app_state.sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Store revision request and trigger re-processing
+        session = app_state.sessions[session_id]
+        session["revision_requests"] = session.get("revision_requests", {})
+        session["revision_requests"][message_id] = revision_request
+        
+        return {"status": "revision_requested"}
+    
+    except Exception as e:
+        app_state.logger.error(f"Chat revision error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/chat/download/{session_id}")
+async def download_chat_result(session_id: str):
+    """Download the chat-edited document."""
+    if session_id not in app_state.sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = app_state.sessions[session_id]
+    
+    # Build final document from approved edits
+    final_paragraphs = []
+    paragraphs = session["paragraphs"]
+    approved_edits = session["approved_edits"]
+    
+    for i, original_para in enumerate(paragraphs):
+        # Find if there's an approved edit for this paragraph
+        edited_para = original_para
+        for msg_id, approved in approved_edits.items():
+            if approved and msg_id.startswith(f"para_{i}_"):
+                # Extract the edited text from session data
+                edited_para = session.get("edited_paragraphs", {}).get(msg_id, original_para)
+                break
+        
+        final_paragraphs.append(edited_para)
+    
+    final_content = "\n\n".join(final_paragraphs)
+    
+    # Save to output directory
+    output_path = app_state.output_dir / f"{session_id}_chat_edited.txt"
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(final_content)
+    
+    return FileResponse(
+        output_path,
+        filename=f"{session['filename']}_chat_edited.txt",
+        media_type="text/plain"
+    )
+
+
+@app.websocket("/ws/chat/{session_id}")
+async def chat_websocket_endpoint(websocket: WebSocket, session_id: str):
+    """WebSocket endpoint for chat editing updates."""
+    await manager.connect(websocket, session_id)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(session_id)
+
+
+async def process_chat_editing(session_id: str, api_key: str):
+    """Background task for interactive chat editing."""
+    session = app_state.sessions[session_id]
+    
+    try:
+        from src.api.claude_client import AsyncClaudeClient
+        
+        # Initialize client
+        client = AsyncClaudeClient(api_key=api_key)
+        
+        paragraphs = session["paragraphs"]
+        session["edited_paragraphs"] = {}
+        
+        # Process each paragraph
+        for i, paragraph in enumerate(paragraphs):
+            if not paragraph.strip():
+                continue
+            
+            message_id = f"para_{i}_{int(datetime.now().timestamp() * 1000)}"
+            
+            # Create prompt for paragraph editing
+            prompt = f"""Please analyze this paragraph and suggest improvements for grammar, clarity, and style:
+
+Original paragraph:
+{paragraph}
+
+Please provide:
+1. An improved version of the paragraph
+2. A brief explanation of the changes made
+
+Format your response as:
+EDITED: [your improved version]
+EXPLANATION: [brief explanation of changes]
+
+If no changes are needed, respond with:
+EDITED: {paragraph}
+EXPLANATION: No changes needed - the paragraph is well-written as is."""
+
+            try:
+                # Get AI response using the correct method
+                response = await client.edit_text_async(
+                    text=paragraph,
+                    instructions="""Please analyze this paragraph and suggest improvements for grammar, clarity, and style.
+
+Please format your response as:
+EDITED: [your improved version]
+EXPLANATION: [brief explanation of changes]
+
+If no changes are needed, respond with:
+EDITED: [original text]
+EXPLANATION: No changes needed - the paragraph is well-written as is."""
+                )
+                
+                # Parse response from the API
+                full_response = response["edited_text"]
+                lines = full_response.strip().split('\n')
+                edited_text = paragraph
+                explanation = "No explanation provided"
+                
+                for line in lines:
+                    if line.startswith('EDITED:'):
+                        edited_text = line[7:].strip()
+                    elif line.startswith('EXPLANATION:'):
+                        explanation = line[12:].strip()
+                
+                # Store the edited paragraph
+                session["edited_paragraphs"][message_id] = edited_text
+                
+                # Send WebSocket update
+                await manager.send_update(session_id, {
+                    "type": "edit_suggestion",
+                    "message_id": message_id,
+                    "paragraph_index": i,
+                    "original_text": paragraph,
+                    "edited_text": edited_text,
+                    "explanation": explanation
+                })
+                
+                # Wait a moment before processing next paragraph
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                app_state.logger.error(f"Error processing paragraph {i}: {e}")
+                await manager.send_update(session_id, {
+                    "type": "error",
+                    "error": f"Error processing paragraph {i}: {str(e)}"
+                })
+        
+        # Send completion message
+        await manager.send_update(session_id, {
+            "type": "processing_complete"
+        })
+        
+        session["status"] = "chat_completed"
+        
+    except Exception as e:
+        app_state.logger.error(f"Chat processing error: {e}")
+        session["status"] = "chat_failed"
+        await manager.send_update(session_id, {
+            "type": "error",
+            "error": str(e)
+        })
 
 
 # Startup event
